@@ -218,3 +218,13 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Environment & Secrets
+.env
+venv/
+.venv/
+__pycache__/
+
+# Local Database & Runtime Telemetry
+data/*.db
+data/*.jsonl
