@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 
@@ -17,13 +18,23 @@ st.set_page_config(
     layout="wide",
 )
 
-# Initialize session state for chat history
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# --- SIDEBAR: Security Controls & CV Upload ---
+# --- SIDEBAR: Engine, Security Controls & CV Upload ---
 with st.sidebar:
     st.title("Security Controls")
+
+    default_provider = os.getenv("LLM_PROVIDER", "ollama").lower()
+    provider_index = 0 if default_provider == "ollama" else 1
+
+    provider_label = st.selectbox(
+        "LLM Engine Provider:",
+        options=["Local Ollama (Offline)", "Google Gemini API (Cloud)"],
+        index=provider_index,
+        help="Run completely offline via local Ollama models or connect to Google Gemini API.",
+    )
+    selected_provider = "ollama" if "Ollama" in provider_label else "gemini"
 
     security_mode_label = st.radio(
         "Select Security Mode:",
@@ -50,7 +61,7 @@ with st.sidebar:
             with st.expander("Preview Extracted CV Text"):
                 st.text(cv_text[:1000] + ("..." if len(cv_text) > 1000 else ""))
         except ValueError as err:
-            st.error(f"CV Upload Error: {err}")
+            st.error(f"❌ CV Upload Error: {err}")
 
     st.divider()
     col1, col2 = st.columns(2)
@@ -66,6 +77,7 @@ with st.sidebar:
 # --- MAIN AREA: HR Copilot Chat ---
 st.title("Enterprise HR Copilot — LLM Application Security Lab")
 st.caption(
+    f"**Engine:** `{selected_provider.upper()}` | "
     f"**Active Mode:** `{security_mode}` | "
     f"**CV Attached:** `{'Yes (' + uploaded_cv.name + ')' if uploaded_cv else 'No'}`"
 )
@@ -73,7 +85,6 @@ st.caption(
 # Render existing chat messages
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
-        # Intentionally using st.markdown to allow demonstrating Markdown image rendering in Vulnerable mode
         st.markdown(msg["content"])
         if msg.get("meta"):
             meta = msg["meta"]
@@ -87,18 +98,17 @@ for msg in st.session_state.messages:
 
 # Chat input
 if user_prompt := st.chat_input("Ask the HR Copilot about candidates or summarize the uploaded CV..."):
-    # 1. Display user message
     st.session_state.messages.append({"role": "user", "content": user_prompt})
     with st.chat_message("user"):
         st.markdown(user_prompt)
 
-    # 2. Query the agent and display assistant response
     with st.chat_message("assistant"):
-        with st.spinner("HR Copilot is thinking..."):
+        with st.spinner(f"HR Copilot ({selected_provider}) is thinking..."):
             result = ask_hr_agent(
                 user_prompt=user_prompt,
                 cv_text=cv_text,
                 security_mode=security_mode,
+                provider=selected_provider,
             )
 
         st.markdown(result["answer"])
@@ -111,7 +121,6 @@ if user_prompt := st.chat_input("Ask the HR Copilot about candidates or summariz
             else:
                 st.write("*No database tools invoked during this turn.*")
 
-    # 3. Save assistant response to history
     st.session_state.messages.append(
         {
             "role": "assistant",
