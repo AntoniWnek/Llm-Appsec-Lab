@@ -14,6 +14,7 @@ from src.guardrails import (
     inspect_user_input,
     sandbox_cv_document,
 )
+from src.telemetry import log_security_event
 from src.tools import (
     clear_tool_trace,
     get_tool_trace,
@@ -249,8 +250,6 @@ def _run_ollama_agent(
 
     answer_text = (msg.get("content") or "").strip()
 
-    # Fallback: if the model emitted a disallowed tool call with empty text content,
-    # run a pure text generation pass without tools so the user still gets a clean summary/answer.
     if not answer_text:
         fallback_response = ollama.chat(
             model=model_name,
@@ -268,33 +267,51 @@ def ask_hr_agent(
     cv_text: str = "",
     security_mode: str = "VULNERABLE",
     provider: str | None = None,
+    record_telemetry: bool = True,
 ) -> dict[str, Any]:
     clear_tool_trace()
     start_time = time.perf_counter()
 
     active_provider = (provider or os.getenv("LLM_PROVIDER", "ollama")).lower()
     is_hardened = security_mode.upper() == "HARDENED"
+    cv_attached = bool(cv_text and cv_text.strip())
 
     # --- HARDENED MODE: Layer 4 Input Guardrail & CV XML Sandboxing ---
     if is_hardened:
         is_input_blocked, cleaned_prompt, input_block_reason = inspect_user_input(user_prompt)
         if is_input_blocked:
             latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
+            answer_text = (
+                "**Security Alert (Input Guardrail):** Your request was blocked because it "
+                "attempted to access restricted tables, internal system policies, or unsafe SQL syntax."
+            )
+            model_label = f"{active_provider} (input-guardrail)"
+            event = None
+            if record_telemetry:
+                event = log_security_event(
+                    user_prompt=user_prompt,
+                    cv_attached=cv_attached,
+                    security_mode=security_mode,
+                    model=model_label,
+                    status="BLOCKED",
+                    block_reason=input_block_reason,
+                    latency_ms=latency_ms,
+                    tool_trace=[],
+                    answer_text=answer_text,
+                )
             return {
-                "answer": (
-                    "**Security Alert (Input Guardrail):** Your request was blocked because it "
-                    "attempted to access restricted tables, internal system policies, or unsafe SQL syntax."
-                ),
+                "answer": answer_text,
                 "status": "BLOCKED",
                 "block_reason": input_block_reason,
                 "security_mode": security_mode,
-                "model": f"{active_provider} (input-guardrail)",
+                "model": model_label,
                 "latency_ms": latency_ms,
                 "tool_trace": [],
+                "telemetry_event": event,
             }
 
         full_prompt = cleaned_prompt
-        if cv_text:
+        if cv_attached:
             sandboxed_cv = sandbox_cv_document(cv_text)
             full_prompt = f"{sandboxed_cv}\n\nRecruiter Request: {cleaned_prompt}"
     else:
@@ -302,14 +319,30 @@ def ask_hr_agent(
         is_blocked, processed_or_error = _flawed_vulnerable_preprocessor(user_prompt, cv_text)
         if is_blocked:
             latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
+            answer_text = f"**{processed_or_error}**"
+            model_label = f"{active_provider} (pre-filter)"
+            event = None
+            if record_telemetry:
+                event = log_security_event(
+                    user_prompt=user_prompt,
+                    cv_attached=cv_attached,
+                    security_mode=security_mode,
+                    model=model_label,
+                    status="BLOCKED",
+                    block_reason="BLOCKED_BY_NAIVE_WAF",
+                    latency_ms=latency_ms,
+                    tool_trace=[],
+                    answer_text=answer_text,
+                )
             return {
-                "answer": f"**{processed_or_error}**",
+                "answer": answer_text,
                 "status": "BLOCKED",
                 "block_reason": "BLOCKED_BY_NAIVE_WAF",
                 "security_mode": security_mode,
-                "model": f"{active_provider} (pre-filter)",
+                "model": model_label,
                 "latency_ms": latency_ms,
                 "tool_trace": [],
+                "telemetry_event": event,
             }
         full_prompt = processed_or_error
 
@@ -345,6 +378,20 @@ def ask_hr_agent(
 
     latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
 
+    event = None
+    if record_telemetry:
+        event = log_security_event(
+            user_prompt=user_prompt,
+            cv_attached=cv_attached,
+            security_mode=security_mode,
+            model=model_label,
+            status=status,
+            block_reason=block_reason,
+            latency_ms=latency_ms,
+            tool_trace=trace,
+            answer_text=answer_text,
+        )
+
     return {
         "answer": answer_text,
         "status": status,
@@ -353,4 +400,5 @@ def ask_hr_agent(
         "model": model_label,
         "latency_ms": latency_ms,
         "tool_trace": trace,
+        "telemetry_event": event,
     }
