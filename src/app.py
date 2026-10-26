@@ -43,9 +43,6 @@ with st.sidebar:
     )
     security_mode = "VULNERABLE" if "Vulnerable" in security_mode_label else "HARDENED"
 
-    if security_mode == "HARDENED":
-        st.info("Hardened controls will be implemented in Stages 4 & 5. Currently running baseline agent.")
-
     st.divider()
     st.subheader("Candidate CV Upload")
     uploaded_cv = st.file_uploader(
@@ -61,7 +58,7 @@ with st.sidebar:
             with st.expander("Preview Extracted CV Text"):
                 st.text(cv_text[:1000] + ("..." if len(cv_text) > 1000 else ""))
         except ValueError as err:
-            st.error(f"❌ CV Upload Error: {err}")
+            st.error(f"CV Upload Error: {err}")
 
     st.divider()
     col1, col2 = st.columns(2)
