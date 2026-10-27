@@ -10,6 +10,7 @@ if str(ROOT_DIR) not in sys.path:
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 from src.agent import ask_hr_agent
 from src.init_db import init_database
 from src.telemetry import clear_telemetry_events, read_telemetry_events
@@ -23,8 +24,7 @@ st.set_page_config(
     layout="wide",
 )
 
-# Compact sidebar CSS to eliminate vertical scrollbar, reduce top padding, 
-# and increase sidebar subheader size to match title size without default margins.
+# Compact sidebar CSS and tab-like styling for top view navigation
 st.markdown(
     """
     <style>
@@ -39,19 +39,59 @@ st.markdown(
             margin-top: 0.6rem !important;
             margin-bottom: 0.6rem !important;
         }
-        div.block-container {
-            padding-top: 2rem !important;
-        }
         /* Zwiększenie rozmiaru subheadera w sidebarze do rozmiaru tytułu */
         section[data-testid="stSidebar"] h3 {
             font-size: 2rem !important;
             font-weight: 700 !important;
             line-height: 1.2 !important;
         }
+        section.main div.block-container {
+            padding-top: 1.5rem !important;
+            padding-bottom: 5rem !important;
+        }
+        /* Style the horizontal navigation bar in the main area like clean tabs */
+        div[data-testid="stMain"] div[role="radiogroup"] {
+            border-bottom: 1px solid rgba(128, 128, 128, 0.35);
+            padding-bottom: 0.5rem;
+            margin-bottom: 1rem;
+            gap: 2rem;
+        }
     </style>
     """,
     unsafe_allow_html=True,
 )
+
+
+def auto_scroll_to_bottom() -> None:
+    """Scrolls the main Streamlit viewport to the latest message at the bottom."""
+    components.html(
+        f"""
+        <script>
+            function scrollDown() {{
+                const selectors = [
+                    '[data-testid="stMain"]',
+                    'section.main',
+                    '[data-testid="stAppViewContainer"]'
+                ];
+                for (const sel of selectors) {{
+                    const el = window.parent.document.querySelector(sel);
+                    if (el && el.scrollHeight > el.clientHeight) {{
+                        el.scrollTo({{ top: el.scrollHeight, behavior: 'smooth' }});
+                    }}
+                }}
+                window.parent.scrollTo({{
+                    top: window.parent.document.body.scrollHeight,
+                    behavior: 'smooth'
+                }});
+            }}
+            setTimeout(scrollDown, 50);
+            setTimeout(scrollDown, 250);
+        </script>
+        <!-- trigger: {len(st.session_state.get("messages", []))} -->
+        """,
+        height=0,
+    )
+
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -131,7 +171,7 @@ with st.sidebar:
         st.toast("Telemetry logs cleared.")
         st.rerun()
 
-# --- MAIN AREA HEADER ---
+# --- MAIN AREA HEADER & TOP VIEW NAVIGATION ---
 st.title("Enterprise HR Copilot — LLM Application Security Lab")
 st.caption(
     f"**Engine:** `{selected_provider.upper()}` | "
@@ -139,17 +179,25 @@ st.caption(
     f"**CV Attached:** `{'Yes (' + uploaded_cv.name + ')' if uploaded_cv else 'No'}`"
 )
 
-tab_chat, tab_soc = st.tabs(
-    [
+active_view = st.radio(
+    "Select View:",
+    options=[
         "HR Copilot Chat (Red / Blue Playground)",
         "SOC Telemetry & Benchmark Dashboard",
-    ]
+    ],
+    horizontal=True,
+    label_visibility="collapsed",
 )
 
 # =====================================================================
-# TAB 1: Interactive HR Copilot Chat
+# VIEW 1: Interactive HR Copilot Chat (Root-Level Fixed Bottom Input)
 # =====================================================================
-with tab_chat:
+if active_view == "HR Copilot Chat (Red / Blue Playground)":
+    if not st.session_state.messages:
+        st.info(
+            "Ask the HR Copilot to search candidates (e.g., 'Show me all candidates') or upload a candidate CV in the sidebar to summarize it."
+        )
+
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
@@ -171,10 +219,16 @@ with tab_chat:
                     else:
                         st.write("*No database tools invoked during this turn.*")
 
-    if user_prompt := st.chat_input("Ask the HR Copilot about candidates or summarize the uploaded CV..."):
+    # Calling st.chat_input at the root level pins it permanently to the bottom of the screen
+    if user_prompt := st.chat_input(
+        "Ask the HR Copilot about candidates or summarize the uploaded CV..."
+    ):
         st.session_state.messages.append({"role": "user", "content": user_prompt})
         with st.chat_message("user"):
             st.markdown(user_prompt)
+
+        # Immediately scroll down to show the newly submitted user prompt
+        auto_scroll_to_bottom()
 
         with st.chat_message("assistant"):
             with st.spinner(f"HR Copilot ({selected_provider}) is processing..."):
@@ -210,11 +264,13 @@ with tab_chat:
                 "meta": result,
             }
         )
+        # Scroll to the very bottom once the assistant response finishes rendering
+        auto_scroll_to_bottom()
 
 # =====================================================================
-# TAB 2: SOC Telemetry & Benchmark Analytics Dashboard
+# VIEW 2: SOC Telemetry & Benchmark Analytics Dashboard
 # =====================================================================
-with tab_soc:
+else:
     st.subheader("Live SIEM Security Event Telemetry (data/telemetry.jsonl)")
 
     events = read_telemetry_events()
@@ -244,7 +300,9 @@ with tab_soc:
 
         with chart_col1:
             st.markdown("##### Events by SOC Severity Level")
-            severity_counts = df["severity"].value_counts().rename_axis("Severity").reset_index(name="Count")
+            severity_counts = (
+                df["severity"].value_counts().rename_axis("Severity").reset_index(name="Count")
+            )
             st.bar_chart(severity_counts.set_index("Severity"))
 
         with chart_col2:
@@ -304,7 +362,9 @@ with tab_soc:
     st.subheader("Empirical Benchmark Evaluation (data/benchmark_results.json)")
 
     if not BENCHMARK_JSON_PATH.exists():
-        st.info("Benchmark file not found. Run `python src/run_benchmark.py` to generate empirical metrics.")
+        st.info(
+            "Benchmark file not found. Run `python src/run_benchmark.py` to generate empirical metrics."
+        )
     else:
         try:
             bench_data = json.loads(BENCHMARK_JSON_PATH.read_text(encoding="utf-8"))
