@@ -27,7 +27,7 @@ def normalize_text(text: str) -> str:
 
 
 def inspect_user_input(user_prompt: str) -> tuple[bool, str, str | None]:
-    """Defense Layer 4 (Input Normalization & Heuristic Guardrail for Hardened Mode)."""
+    """Defense Layer 1 (Input Normalization & Heuristic Guardrail for Hardened Mode)."""
     cleaned = normalize_text(user_prompt)
 
     if len(cleaned) > MAX_PROMPT_CHARS:
@@ -42,13 +42,12 @@ def inspect_user_input(user_prompt: str) -> tuple[bool, str, str | None]:
 
 
 def sandbox_cv_document(cv_text: str) -> str:
-    """Sanitizes untrusted CV text and wraps it in strict XML data delimiters (<untrusted_cv_data>)."""
+    """Defense Layer 2 (Untrusted Document XML Sandboxing)."""
     if not cv_text:
         return ""
 
     cleaned_cv = normalize_text(cv_text)
 
-    # Strip injected workflow blocks or fake delimiter breakouts inside the untrusted CV
     if "--- END OF CANDIDATE CV DOCUMENT ---" in cleaned_cv:
         cleaned_cv = cleaned_cv.split("--- END OF CANDIDATE CV DOCUMENT ---")[0].strip()
 
@@ -63,8 +62,31 @@ def sandbox_cv_document(cv_text: str) -> str:
     )
 
 
+def sanitize_db_record_value(field_value: str) -> tuple[bool, str]:
+    """Defense Layer 3b (Database Egress Sanitizer against Second-Order Stored Prompt Injection).
+
+    Scans text fields retrieved from SQLite rows before they are passed into the LLM context.
+    Returns:
+        (was_sanitized, clean_field_value)
+    """
+    if not isinstance(field_value, str) or not field_value:
+        return False, field_value
+
+    cleaned = normalize_text(field_value)
+    lower_val = cleaned.lower()
+
+    for pattern in CHAT_INJECTION_PATTERNS:
+        if re.search(pattern, lower_val):
+            if "[HR-AUDIT-BENCHMARK]" in cleaned:
+                safe_prefix = cleaned.split("[HR-AUDIT-BENCHMARK]")[0].strip()
+                return True, f"{safe_prefix} [REDACTED_STORED_DB_INJECTION]"
+            return True, "[REDACTED_STORED_DB_INJECTION]"
+
+    return False, cleaned
+
+
 def inspect_and_sanitize_output(answer_text: str) -> tuple[bool, str, str | None]:
-    """Defense Layer 3 (Output DLP Canary Scanner & Markdown Image Sanitizer)."""
+    """Defense Layer 5 (Output DLP Canary Scanner & Markdown Image Sanitizer)."""
     if not answer_text:
         return False, "", None
 
@@ -80,7 +102,7 @@ def inspect_and_sanitize_output(answer_text: str) -> tuple[bool, str, str | None
     for indicator in restricted_leaks:
         if indicator in lower_answer:
             redacted_msg = (
-                "**Security Alert (Output DLP):** The generated response was blocked because "
+                "Security Alert (Output DLP): The generated response was blocked because "
                 "it contained restricted executive compensation data or a confidential Canary Honeytoken (`CONF-HR-9921-X`)."
             )
             return True, redacted_msg, "BLOCKED_OUTPUT_DLP_CANARY"
