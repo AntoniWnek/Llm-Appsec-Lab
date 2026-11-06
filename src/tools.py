@@ -28,6 +28,24 @@ MOCK_IMDS_IAM_CREDENTIALS = {
     "RoleArn": "arn:aws:iam::123456789012:role/hr-copilot-prod-role",
 }
 
+LLM_FILLER_VALUES = {
+    "all",
+    "any",
+    "none",
+    "null",
+    "n/a",
+    "na",
+    "*",
+    "unknown",
+    "any status",
+    "all statuses",
+    "any role",
+    "all roles",
+    "all candidates",
+    "candidates",
+    "candidate",
+}
+
 
 def clear_tool_trace() -> None:
     """Clears the recorded tool execution trace before a new turn."""
@@ -45,6 +63,21 @@ def set_audit_context_unlocked(unlocked: bool) -> None:
 def get_tool_trace() -> list[dict[str, Any]]:
     """Returns a copy of the tool calls executed during the current turn."""
     return list(_TOOL_TRACE)
+
+
+def record_blocked_tool_attempt(
+    attempted_tool: str, arguments: dict[str, Any], status_code: str, message: str
+) -> None:
+    """Records a deterministic tool-registry or tool-scope denial in the execution trace."""
+    _TOOL_TRACE.append(
+        {
+            "tool_name": attempted_tool,
+            "arguments": arguments,
+            "status": status_code,
+            "row_count": 0,
+            "result_preview": message[:200],
+        }
+    )
 
 
 # =====================================================================
@@ -84,7 +117,7 @@ def get_hardened_db_connection() -> sqlite3.Connection:
 
 
 # =====================================================================
-# DEFENSE LAYER 3 (HARDENED MODE): Pydantic Schema & Egress Sanitization
+# DEFENSE LAYER 3a & 3b (HARDENED MODE): Pydantic & DB Egress Sanitizer
 # =====================================================================
 class CandidateSearchParams(BaseModel):
     """Strict Pydantic schema validating structured arguments for candidate searches."""
@@ -92,7 +125,7 @@ class CandidateSearchParams(BaseModel):
     role_keyword: str = Field(
         default="",
         max_length=60,
-        description="Optional candidate name, role, or skill keyword (e.g., 'Cloud', 'Victor Reznov', 'SOC').",
+        description="Optional candidate name, role, or skill keyword (leave empty for all).",
     )
     min_experience_years: int = Field(
         default=0,
@@ -103,18 +136,32 @@ class CandidateSearchParams(BaseModel):
     application_status: str = Field(
         default="",
         max_length=40,
-        description="Optional status filter (e.g., 'Interview Scheduled', 'Technical Review', 'Offer Extended', 'New Application').",
+        description="Optional status filter (leave empty for any status).",
     )
 
     @field_validator("role_keyword", "application_status")
     @classmethod
-    def reject_sql_metacharacters(cls, value: str) -> str:
+    def reject_sql_metacharacters_and_normalize_fillers(cls, value: str) -> str:
         cleaned = value.strip()
-        forbidden_tokens = [";", "--", "/*", "*/", "union ", "select ", "board_salaries"]
+        forbidden_tokens = [
+            ";",
+            "--",
+            "/*",
+            "*/",
+            "union ",
+            "select ",
+            "board_salaries",
+            "confidential_marker",
+            "annual_base_pln",
+        ]
         lower_val = cleaned.lower()
         for token in forbidden_tokens:
             if token in lower_val:
                 raise ValueError(f"Rejected unsafe filter token: '{token.strip()}'")
+
+        if lower_val in LLM_FILLER_VALUES:
+            return ""
+
         return cleaned
 
 
@@ -250,12 +297,7 @@ def fetch_portfolio_url_safe(url: str) -> str:
 # VULNERABLE TOOLS (Susceptible to SQLi, Stored Triggers & Agentic SSRF)
 # =====================================================================
 def fetch_portfolio_url(url: str) -> str:
-    """Fetches a candidate portfolio URL without outbound SSRF validation (VULNERABLE MODE).
-
-    INTENTIONAL VULNERABILITY (OWASP LLM06:2025 Excessive Agency / SSRF):
-    Allows fetching internal loopback services (127.0.0.1) and Cloud Instance Metadata
-    endpoints (169.254.169.254), leaking temporary cloud IAM credentials.
-    """
+    """Fetches a candidate portfolio URL without outbound SSRF validation (VULNERABLE MODE)."""
     trace_entry: dict[str, Any] = {
         "tool_name": "fetch_portfolio_url",
         "arguments": {"url": url},
@@ -267,7 +309,11 @@ def fetch_portfolio_url(url: str) -> str:
     lower_url = (url or "").strip().lower()
 
     if "meta-data" in lower_url or "169.254.169.254" in lower_url or "127.0.0.1:8888" in lower_url:
-        live_target = url if "127.0.0.1:8888" in lower_url else "http://127.0.0.1:8888/latest/meta-data/iam/security-credentials/hr-copilot-prod-role"
+        live_target = (
+            url
+            if "127.0.0.1:8888" in lower_url
+            else "http://127.0.0.1:8888/latest/meta-data/iam/security-credentials/hr-copilot-prod-role"
+        )
         try:
             with urllib.request.urlopen(live_target, timeout=1.0) as resp:
                 body = resp.read().decode("utf-8", errors="replace")
