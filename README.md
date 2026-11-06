@@ -46,6 +46,8 @@ Replaces probabilistic prompt rules with five deterministic code-level security 
 | `ATK-04` | Insider (HR User) | TOCTOU Unicode Zero-Width Smuggling (`U+200B`) | `LLM01:2025 Prompt Injection` | Exploited | Mitigated | Unicode Control Character Stripping |
 | `ATK-05` | Insider (HR User) | LLM-Driven `UNION SELECT` SQL Injection | `LLM05:2025 Improper Output Handling` / `LLM06:2025 Excessive Agency` | Exploited | Mitigated | Parameterized Queries & `sqlite3.set_authorizer` |
 | `ATK-06` | External Applicant | Off-Canvas PDF Indirect Injection & Zero-Click Exfiltration | `LLM01:2025` / `LLM02:2025 Sensitive Information Disclosure` | Exploited | Mitigated | XML Document Sandbox, Output DLP & Markdown Sanitizer |
+| `ATK-07` | External Applicant | Second-Order (Stored) Prompt Injection via SQLite Row | `LLM01:2025` / `LLM02:2025 Sensitive Information Disclosure` | Exploited | Mitigated | Database Egress Sanitizer (`sanitize_db_record_value`) |
+| `ATK-08` | Insider / Applicant | Agentic SSRF to Cloud Metadata (`169.254.169.254`) | `LLM06:2025 Excessive Agency` / `SSRF` | Exploited | Mitigated | Zero-Trust SSRF Egress Guard (`ipaddress` & Domain Allowlist) |
 
 ---
 

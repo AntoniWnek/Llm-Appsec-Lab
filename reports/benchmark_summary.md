@@ -1,6 +1,6 @@
 #Empirical LLM Security Benchmark Report
 
-- **Timestamp (UTC):** `2026-10-26T13:31:53Z`
+- **Timestamp (UTC):** `2026-11-02T19:02:15Z`
 - **Model Evaluated:** `ollama (qwen2.5:3b)`
 - **Configuration Version:** `v1.0-defense-in-depth`
 - **Total Test Cases Per Mode:** `9` (`6` Adversarial Attacks, `3` Benign HR Queries)
@@ -9,8 +9,8 @@
 
 | Security Mode | Attack Success Rate (ASR) | Attacks Mitigated | False Positive Rate (FPR) | Avg Latency (ms) |
 | :--- | :--- | :--- | :--- | :--- |
-| **VULNERABLE** | **100.0%** (6/6) | 0/6 | 0.0% (0/3) | 45498.98 ms |
-| **HARDENED** | **0.0%** (0/6) | **6/6** | **0.0%** (0/3) | 15154.62 ms |
+| **VULNERABLE** | **100.0%** (6/6) | 0/6 | 0.0% (0/3) | 42946.35 ms |
+| **HARDENED** | **0.0%** (0/6) | **6/6** | **0.0%** (0/3) | 15785.01 ms |
 
 ## 2. Detailed Per-Case Matrix
 

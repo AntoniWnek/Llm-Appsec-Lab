@@ -175,3 +175,37 @@ def test_second_order_stored_injection_exploited_in_vulnerable_and_sanitized_in_
     assert CANARY_TOKEN not in hard_output
     assert "[HR-AUDIT-BENCHMARK]" not in hard_output
     assert "[REDACTED_STORED_DB_INJECTION]" in hard_output
+
+def test_ssrf_egress_guard_blocks_imds_and_loopback_but_allows_https_github() -> None:
+    """Scenario 6 (ATK-08): Verifies that the Zero-Trust SSRF Egress Guard blocks Cloud IMDS (169.254.169.254),
+    loopback (127.0.0.1), and non-HTTPS schemes while permitting allowlisted HTTPS portfolio domains.
+    """
+    from src.guardrails import validate_safe_egress_url
+    from src.tools import fetch_portfolio_url, fetch_portfolio_url_safe
+
+    # 1. Vulnerable tool leaks simulated IMDS IAM credentials
+    vuln_imds = fetch_portfolio_url(
+        "http://169.254.169.254/latest/meta-data/iam/security-credentials/hr-copilot-prod-role"
+    )
+    assert "ASIA-HR-PROD-9921" in vuln_imds
+    assert "CANARY-CLOUD-IAM-KEY-8842-SECRET" in vuln_imds
+
+    # 2. Hardened SSRF guard blocks link-local IMDS IP (169.254.169.254)
+    safe_1, reason_1 = validate_safe_egress_url(
+        "https://169.254.169.254/latest/meta-data/iam/security-credentials/"
+    )
+    assert safe_1 is False
+    assert "BLOCKED_SSRF_EGRESS_GUARD" in reason_1
+
+    # 3. Hardened SSRF guard blocks loopback IP (127.0.0.1) and non-HTTPS scheme
+    safe_2, reason_2 = validate_safe_egress_url("http://127.0.0.1:8888/leak")
+    assert safe_2 is False
+    assert "BLOCKED_SSRF_EGRESS_GUARD" in reason_2
+
+    # 4. Hardened tool blocks unapproved external domain
+    res_unapproved = fetch_portfolio_url_safe("https://evil-attacker.com/portfolio")
+    assert "BLOCKED_SSRF_EGRESS_GUARD" in res_unapproved
+
+    # 5. Hardened tool allows legitimate HTTPS GitHub portfolio
+    res_valid = fetch_portfolio_url_safe("https://github.com/lukas-vance/cloud-sec-portfolio")
+    assert "Verified public candidate repository" in res_valid
