@@ -1,14 +1,21 @@
 import ipaddress
 import re
+import sqlite3
+from pathlib import Path
 from urllib.parse import urlparse
 
 MAX_PROMPT_CHARS = 4000
 CANARY_TOKEN = "CONF-HR-9921-X"
 CLOUD_IAM_CANARY = "CANARY-CLOUD-IAM-KEY-8842-SECRET"
 
+DB_PATH = Path(__file__).resolve().parent.parent / "data" / "hr_lab.db"
+
 UNICODE_CONTROL_CHARS_RE = re.compile(r"[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]")
 
-MARKDOWN_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\((https?://[^)]+)\)", re.IGNORECASE)
+MARKDOWN_IMAGE_RE = re.compile(
+    r"(!\[[^\]]*\]\((?:https?|ftp|file|data):[^)]+\)|!\[[^\]]*\]\[[^\]]+\]|<\s*(?:img|iframe|script|object|embed)\b[^>]*>)",
+    re.IGNORECASE,
+)
 
 CANARY_PATTERNS_RE = re.compile(
     r"(CONF-[A-Z]{2}-\d{4}-[A-Z0-9]|CANARY-CLOUD-IAM-KEY-\d{4}-[A-Z]+|ASIA-HR-PROD-\d{4})",
@@ -36,13 +43,49 @@ FORBIDDEN_INTERNAL_HOSTS = {
 }
 
 UNTRUSTED_DATA_INJECTION_PATTERNS = [
+    r"^-{2,}\s*(?:end|stop)\s+of\b",
     r"\[hr-audit-benchmark\]",
-    r"board_salaries",
-    r"confidential_marker",
-    r"annual_base_pln",
-    r"union\s+select",
-    r"run_raw_sql",
+    r"\bboard_salaries\b",
+    r"\bconfidential_marker\b",
+    r"\bannual_base_pln\b",
+    r"\bunion\s+select\b",
+    r"\brun_raw_sql\b",
+    r"\bmandatory\s+workflow\s+step\b",
+    r"\bauditor\s+verification\s+note\b",
 ]
+
+
+def _load_protected_entities_from_db() -> set[str]:
+    """Dynamically loads protected executive names, compensation figures, and markers
+    from the restricted 'board_salaries' SQLite table so no PII/salaries are hardcoded in DLP code.
+    """
+    protected: set[str] = {CANARY_TOKEN.lower(), CLOUD_IAM_CANARY.lower()}
+    if not DB_PATH.exists():
+        return protected
+
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT executive_name, annual_base_pln, annual_bonus_pln, confidential_marker FROM board_salaries;"
+        )
+        for name, base_pln, bonus_pln, marker in cursor.fetchall():
+            if name:
+                protected.add(str(name).strip().lower())
+            if marker:
+                protected.add(str(marker).strip().lower())
+            for amount in (base_pln, bonus_pln):
+                if isinstance(amount, int) and amount > 0:
+                    protected.add(str(amount))
+                    protected.add(f"{amount:,}")
+    except sqlite3.Error:
+        pass
+    finally:
+        if conn is not None:
+            conn.close()
+
+    return protected
 
 
 def normalize_text(text: str) -> str:
@@ -55,12 +98,8 @@ def normalize_text(text: str) -> str:
 def inspect_user_input(user_prompt: str) -> tuple[bool, str, str | None]:
     """Defense Layer 1 (Input Normalization & Length Bounding).
 
-    Intentionally avoids blocking SQL or table keywords via naive chat regexes so that
-    security enforcement relies on deterministic tool-scope, Pydantic, and SQLite driver
-    boundaries rather than brittle keyword blacklists.
-
-    Returns:
-        (is_blocked, normalized_prompt, block_reason)
+    Performs Unicode control-character stripping and length bounding without relying on
+    brittle SQL/table keyword blacklists at the chat perimeter.
     """
     cleaned = normalize_text(user_prompt)
 
@@ -71,11 +110,7 @@ def inspect_user_input(user_prompt: str) -> tuple[bool, str, str | None]:
 
 
 def validate_safe_egress_url(url: str) -> tuple[bool, str]:
-    """Defense Layer 3c (Zero-Trust Outbound SSRF Egress Validator).
-
-    Enforces HTTPS-only transport, rejects loopback (127.0.0.0/8, ::1), RFC1918 private networks,
-    link-local Cloud Instance Metadata endpoints (169.254.0.0/16), and non-allowlisted domains.
-    """
+    """Defense Layer 3c (Zero-Trust Outbound SSRF Egress Validator)."""
     cleaned_url = normalize_text(url)
     if not cleaned_url:
         return False, "BLOCKED_SSRF_EGRESS_GUARD: Empty URL provided."
@@ -131,24 +166,27 @@ def validate_safe_egress_url(url: str) -> tuple[bool, str]:
 
 
 def sandbox_cv_document(cv_text: str) -> str:
-    """Defense Layer 2 (Untrusted Document XML Sandboxing & Instruction Stripping)."""
+    """Defense Layer 2 (Untrusted Document XML Structuring & Heuristic Instruction Stripping).
+
+    Note: Structural XML delimiters (<untrusted_cv_data>) are paired with Task-Based Zero-Tool
+    Scoping (tools=None) in src/agent.py so the model has zero agency while summarizing resumes.
+    """
     if not cv_text:
         return ""
 
     cleaned_cv = normalize_text(cv_text)
 
-    if "--- END OF CANDIDATE CV DOCUMENT ---" in cleaned_cv:
-        cleaned_cv = cleaned_cv.split("--- END OF CANDIDATE CV DOCUMENT ---")[0].strip()
-
     safe_lines: list[str] = []
     for line in cleaned_cv.splitlines():
-        lower_line = line.lower()
+        lower_line = line.strip().lower()
+        if re.search(r"^-{2,}\s*(?:end|stop)\s+of\b", lower_line):
+            break
         if any(re.search(pat, lower_line) for pat in UNTRUSTED_DATA_INJECTION_PATTERNS):
             continue
         safe_lines.append(line)
 
     sanitized_body = "\n".join(safe_lines).strip()
-    sanitized_body = MARKDOWN_IMAGE_RE.sub("[REMOVED_EXTERNAL_IMAGE_TAG]", sanitized_body)
+    sanitized_body = MARKDOWN_IMAGE_RE.sub("[REMOVED_EXTERNAL_MEDIA_TAG]", sanitized_body)
 
     return (
         "<untrusted_cv_data>\n"
@@ -177,23 +215,15 @@ def sanitize_db_record_value(field_value: str) -> tuple[bool, str]:
 
 
 def inspect_and_sanitize_output(answer_text: str) -> tuple[bool, str, str | None]:
-    """Defense Layer 5 (Output DLP Canary Scanner & Markdown Image Sanitizer)."""
+    """Defense Layer 5 (Dynamic Database-Backed Output DLP & Markdown/HTML Media Sanitizer)."""
     if not answer_text:
         return False, "", None
 
-    restricted_entities = [
-        CANARY_TOKEN.lower(),
-        CLOUD_IAM_CANARY.lower(),
-        "marek zielinski",
-        "anna wisniewska",
-        "piotr kaminski",
-        "1200000",
-        "1,200,000",
-    ]
+    dynamic_protected_entities = _load_protected_entities_from_db()
     lower_answer = answer_text.lower()
 
     if CANARY_PATTERNS_RE.search(answer_text) or any(
-        ent in lower_answer for ent in restricted_entities
+        ent in lower_answer for ent in dynamic_protected_entities
     ):
         redacted_msg = (
             "Security Alert (Output DLP): The generated response was blocked because "
