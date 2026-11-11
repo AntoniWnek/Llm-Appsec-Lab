@@ -298,3 +298,109 @@ def test_agent_integration_output_dlp_catches_hallucinated_canary_leak() -> None
         assert res["status"] == "BLOCKED"
         assert res["block_reason"] == "BLOCKED_OUTPUT_DLP_CANARY"
         assert CANARY_TOKEN not in res["answer"]
+
+
+# =====================================================================
+# 7. CRYPTOGRAPHIC SIEM LOG INTEGRITY TESTS (SHA-256 Hash Chain)
+# =====================================================================
+def test_siem_hash_chain_verifies_intact_multi_event_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifies that sequential SIEM events form a valid SHA-256 cryptographic hash chain."""
+    from src import telemetry
+
+    temp_log = tmp_path / "telemetry.jsonl"
+    monkeypatch.setattr(telemetry, "TELEMETRY_PATH", temp_log)
+
+    e1 = telemetry.log_security_event(
+        user_prompt="Show candidates",
+        cv_attached=False,
+        security_mode="HARDENED",
+        model="ollama",
+        status="ALLOWED",
+        block_reason=None,
+        latency_ms=12.5,
+        tool_trace=[],
+        answer_text="Candidate list.",
+    )
+    e2 = telemetry.log_security_event(
+        user_prompt="Query board_salaries",
+        cv_attached=False,
+        security_mode="HARDENED",
+        model="ollama",
+        status="BLOCKED",
+        block_reason="BLOCKED_UNAUTHORIZED_TOOL",
+        latency_ms=0.4,
+        tool_trace=[],
+        answer_text="Blocked.",
+    )
+
+    assert e1["prev_hash"] == telemetry.GENESIS_HASH
+    assert e2["prev_hash"] == e1["event_hash"]
+
+    report = telemetry.verify_telemetry_integrity(temp_log)
+    assert report["valid"] is True
+    assert report["checked_events"] == 2
+
+
+def test_siem_hash_chain_detects_in_place_payload_tampering(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Negative Test: Verifies that modifying a field inside telemetry.jsonl causes a SHA-256 mismatch."""
+    from src import telemetry
+
+    temp_log = tmp_path / "telemetry.jsonl"
+    monkeypatch.setattr(telemetry, "TELEMETRY_PATH", temp_log)
+
+    telemetry.log_security_event(
+        user_prompt="Exploit query",
+        cv_attached=False,
+        security_mode="VULNERABLE",
+        model="ollama",
+        status="ALLOWED",
+        block_reason=None,
+        latency_ms=50.0,
+        tool_trace=[],
+        answer_text=f"Leaked {CANARY_TOKEN}",
+    )
+
+    tampered_content = temp_log.read_text(encoding="utf-8").replace(
+        '"canary_leaked": true', '"canary_leaked": false'
+    )
+    temp_log.write_text(tampered_content, encoding="utf-8")
+
+    report = telemetry.verify_telemetry_integrity(temp_log)
+    assert report["valid"] is False
+    assert report["compromised_line"] == 1
+    assert "SHA-256 digest mismatch" in report["status_message"]
+
+
+def test_siem_hash_chain_detects_deleted_log_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Negative Test: Verifies that deleting an entry from telemetry.jsonl breaks prev_hash linkage."""
+    from src import telemetry
+
+    temp_log = tmp_path / "telemetry.jsonl"
+    monkeypatch.setattr(telemetry, "TELEMETRY_PATH", temp_log)
+
+    for i in range(3):
+        telemetry.log_security_event(
+            user_prompt=f"Query {i}",
+            cv_attached=False,
+            security_mode="HARDENED",
+            model="ollama",
+            status="ALLOWED",
+            block_reason=None,
+            latency_ms=10.0,
+            tool_trace=[],
+            answer_text="OK",
+        )
+
+    lines = temp_log.read_text(encoding="utf-8").splitlines()
+    temp_log.write_text("\n".join([lines[0], lines[2]]) + "\n", encoding="utf-8")
+
+    report = telemetry.verify_telemetry_integrity(temp_log)
+    assert report["valid"] is False
+    assert report["compromised_line"] == 2
+    assert "Broken hash chain link" in report["status_message"]

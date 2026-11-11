@@ -13,7 +13,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 from src.agent import ask_hr_agent
 from src.init_db import init_database
-from src.telemetry import clear_telemetry_events, read_telemetry_events
+from src.telemetry import clear_telemetry_events, read_telemetry_events, verify_telemetry_integrity
 from src.tools import extract_cv_text
 
 BENCHMARK_JSON_PATH = ROOT_DIR / "data" / "benchmark_results.json"
@@ -273,6 +273,12 @@ if active_view == "HR Copilot Chat (Red / Blue Playground)":
 else:
     st.subheader("Live SIEM Security Event Telemetry (data/telemetry.jsonl)")
 
+    integrity = verify_telemetry_integrity()
+    if integrity["valid"]:
+        st.success(f"SIEM Cryptographic Audit Trail Integrity: {integrity['status_message']}")
+    else:
+        st.error(f"SIEM Cryptographic Audit Trail Alert: {integrity['status_message']}")
+
     events = read_telemetry_events()
     if not events:
         st.info(
@@ -353,6 +359,8 @@ else:
                 "tools_invoked",
                 "latency_ms",
                 "prompt_preview",
+                "prev_hash",
+                "event_hash",
             ]
             if col in filtered_df.columns
         ]
