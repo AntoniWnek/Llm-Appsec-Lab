@@ -38,13 +38,15 @@ ALLOWED_PORTFOLIO_DOMAINS = {
     "www.linkedin.com",
 }
 
+UNSPECIFIED_IPV4 = "0.0.0.0"  # nosec B104
+
 FORBIDDEN_INTERNAL_HOSTS = {
     "localhost",
     "metadata.google.internal",
     "metadata",
     "169.254.169.254",
     "127.0.0.1",
-    "0.0.0.0",
+    UNSPECIFIED_IPV4,
     "[::1]",
     "::1",
 }

@@ -8,6 +8,16 @@ This repository is maintained as a continuously evolving security research lab a
 
 ## [Unreleased]
 
+### Milestone 4: Tamper-Evident SIEM Audit Chain, LLM10 DoS Guardrails & DevSecOps SAST/SCA (2026-11)
+
+#### Added
+- **Tamper-Evident SHA-256 SIEM Hash Chain (`src/telemetry.py`, `src/app.py`):** Linked every security event in `data/telemetry.jsonl` using cryptographic SHA-256 digests (`prev_hash` and `event_hash` anchored to `GENESIS_HASH`). Added `verify_telemetry_integrity()` and live audit-trail verification alerts in the Streamlit SOC Dashboard to detect in-place log modification or line deletion.
+- **OWASP LLM10:2025 Unbounded Consumption Guardrail (`src/guardrails.py`, `src/agent.py`):** Implemented a deterministic sliding-window rate limiter (`MAX_REQUESTS_PER_WINDOW = 15` per `60s` -> `BLOCKED_RATE_LIMIT_EXCEEDED`) and BPE token-budget estimator (`MAX_SINGLE_TURN_TOKENS = 1200`, `MAX_TOKENS_PER_WINDOW = 6000` -> `BLOCKED_TOKEN_BUDGET_EXCEEDED`).
+- **DevSecOps SAST & SCA Pipeline (`.github/workflows/ci.yml`):** Integrated **Bandit** (Static Application Security Testing on `src/`) and **pip-audit** (Software Composition Analysis on `requirements.txt`) into GitHub Actions CI alongside the automated `pytest` suite.
+- Expanded automated test coverage in `tests/test_security_controls.py` to **48 executed test cases across 20 test functions**, adding cryptographic log-tampering tests (payload modification and line deletion) and sliding-window rate/token exhaustion tests.
+
+---
+
 ### Milestone 3: Architectural Boundary Hardening & Deterministic Evaluation (2026-11)
 
 #### Added
@@ -15,7 +25,6 @@ This repository is maintained as a continuously evolving security research lab a
 - Added an MIT `LICENSE`, including the standard warranty and liability disclaimers.
 - Expanded `docs/Threat_Model.md` to cover three distinct threat domains: **Internal Recruiter**, **External Candidate**, and **Execution Environment / Runtime**.
 - Introduced benchmark outcome classification in `src/run_benchmark.py`, distinguishing `DETERMINISTIC_CODE_CONTROL` from `PROBABILISTIC_MODEL_BEHAVIOR`.
-- Expanded automated test coverage in `tests/test_security_controls.py` to **42 executed test cases across 14 test functions**: 5 unit/functional cases, 34 negative boundary cases, and 3 end-to-end integration cases using mocked LLM responses.
 - Documented residual security risks and scope limitations, including model-level semantic misclassification, application-layer versus network-layer SSRF protection, and the limitations of XML-based untrusted-content isolation.
 
 #### Changed
@@ -29,7 +38,6 @@ This repository is maintained as a continuously evolving security research lab a
 
 #### Security
 - Expanded negative boundary tests to cover IPv4-mapped IPv6 representations of cloud metadata addresses (`::ffff:169.254.169.254`), SQLite subqueries, unauthorized `PRAGMA` statements, and oversized file uploads.
-- Strengthened evaluation of tool-scope restrictions and untrusted-document handling in `Hardened` mode.
 
 ---
 
@@ -57,7 +65,7 @@ This repository is maintained as a continuously evolving security research lab a
 - Added PDF and TXT CV extraction through `extract_cv_text()`, including a 2 MB upload-size limit.
 - Implemented offensive scenarios demonstrating Unicode normalization/canonicalization bypasses using zero-width characters (`U+200B`), post-filter Base64 decoding, and substring-based SQL allowlist bypasses using `UNION SELECT`.
 - Added an off-canvas PDF exploit generator (`src/generate_cv_pdfs.py`) that places indirect prompt-injection payloads at coordinates `(-5000, -5000)`, outside the PDF `MediaBox`.
-- Added a local HTTP listener (`src/attacker_listener.py`) on port 8888 to capture simulated Markdown image-beacon callbacks.
+- Added a local HTTP listener (`src/attacker_listener.py`) on port `8888` to capture simulated Markdown image-beacon callbacks.
 - Implemented hardened backend controls using `CandidateSearchParams` (Pydantic), parameterized SQL queries, and SQLite-level access restrictions through `Connection.set_authorizer()`.
 - Added output DLP scanning for synthetic Canary Honeytokens (`CONF-HR-9921-X`).
 - Added Markdown image neutralization and untrusted CV content isolation.
