@@ -404,3 +404,75 @@ def test_siem_hash_chain_detects_deleted_log_line(
     assert report["valid"] is False
     assert report["compromised_line"] == 2
     assert "Broken hash chain link" in report["status_message"]
+
+# =====================================================================
+# 8. OWASP LLM10:2025 UNBOUNDED CONSUMPTION TESTS (Rate & Token Budget)
+# =====================================================================
+def test_rate_limiter_allows_normal_traffic_and_blocks_burst_dos() -> None:
+    """Defense Layer 1b (LLM10:2025): Verifies that sliding-window rate limiting blocks burst floods."""
+    from src.guardrails import check_unbounded_consumption, reset_consumption_limiter
+
+    reset_consumption_limiter()
+    try:
+        for _ in range(3):
+            blocked, reason, _ = check_unbounded_consumption("Show candidates", max_requests=3)
+            assert blocked is False
+            assert reason is None
+
+        blocked_4, reason_4, _ = check_unbounded_consumption("Show candidates", max_requests=3)
+        assert blocked_4 is True
+        assert reason_4 == "BLOCKED_RATE_LIMIT_EXCEEDED"
+    finally:
+        reset_consumption_limiter()
+
+
+def test_token_budget_guard_blocks_single_turn_and_cumulative_exhaustion() -> None:
+    """Defense Layer 1b (LLM10:2025): Verifies single-turn and rolling-window token budget caps."""
+    from src.guardrails import check_unbounded_consumption, reset_consumption_limiter
+
+    reset_consumption_limiter()
+    try:
+        heavy_prompt = "token " * 400
+        blocked_single, reason_single, _ = check_unbounded_consumption(
+            heavy_prompt, max_single_tokens=100
+        )
+        assert blocked_single is True
+        assert reason_single == "BLOCKED_TOKEN_BUDGET_EXCEEDED"
+
+        reset_consumption_limiter()
+        medium_prompt = "word " * 60
+        b1, r1, _ = check_unbounded_consumption(
+            medium_prompt, max_single_tokens=200, max_window_tokens=120
+        )
+        assert b1 is False
+        assert r1 is None
+
+        b2, r2, _ = check_unbounded_consumption(
+            medium_prompt, max_single_tokens=200, max_window_tokens=120
+        )
+        assert b2 is True
+        assert r2 == "BLOCKED_TOKEN_BUDGET_EXCEEDED"
+    finally:
+        reset_consumption_limiter()
+
+
+def test_agent_integration_blocks_unbounded_consumption_burst() -> None:
+    """Integration Test (LLM10:2025): Verifies that ask_hr_agent enforces rate limits in Hardened mode."""
+    from src import guardrails
+
+    guardrails.reset_consumption_limiter()
+    try:
+        with patch.object(guardrails, "MAX_REQUESTS_PER_WINDOW", 2):
+            guardrails.check_unbounded_consumption("Query 1", max_requests=2)
+            guardrails.check_unbounded_consumption("Query 2", max_requests=2)
+
+            res = ask_hr_agent(
+                user_prompt="Query 3 exceeding window",
+                security_mode="HARDENED",
+                provider="ollama",
+                record_telemetry=False,
+            )
+            assert res["status"] == "BLOCKED"
+            assert res["block_reason"] == "BLOCKED_RATE_LIMIT_EXCEEDED"
+    finally:
+        guardrails.reset_consumption_limiter()

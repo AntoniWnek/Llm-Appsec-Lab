@@ -12,15 +12,19 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 from src.agent import ask_hr_agent
+from src.guardrails import reset_consumption_limiter
 from src.init_db import init_database
-from src.telemetry import clear_telemetry_events, read_telemetry_events, verify_telemetry_integrity
+from src.telemetry import (
+    clear_telemetry_events,
+    read_telemetry_events,
+    verify_telemetry_integrity,
+)
 from src.tools import extract_cv_text
 
 BENCHMARK_JSON_PATH = ROOT_DIR / "data" / "benchmark_results.json"
 
 st.set_page_config(
     page_title="LLM AppSec Lab - HR Copilot & SOC",
-    page_icon="🛡️",
     layout="wide",
 )
 
@@ -38,12 +42,6 @@ st.markdown(
         section[data-testid="stSidebar"] hr {
             margin-top: 0.6rem !important;
             margin-bottom: 0.6rem !important;
-        }
-        /* Zwiększenie rozmiaru subheadera w sidebarze do rozmiaru tytułu */
-        section[data-testid="stSidebar"] h3 {
-            font-size: 2rem !important;
-            font-weight: 700 !important;
-            line-height: 1.2 !important;
         }
         section.main div.block-container {
             padding-top: 1.5rem !important;
@@ -122,16 +120,18 @@ with st.sidebar:
         if security_mode == "HARDENED":
             st.caption(
                 "Active Defenses:\n"
-                "1. Input Normalization & Heuristic Guardrail\n"
-                "2. XML <untrusted_cv_data> Sandboxing\n"
-                "3. Pydantic Validation & Parameterized SQL\n"
-                "4. SQLite C-Driver Authorizer (SQLITE_DENY)\n"
-                "5. Output DLP Canary Scanner & Markdown Sanitizer"
+                "1. Unicode Normalization & OWASP LLM10 Rate/Token Limiter\n"
+                "2. Zero-Tool Scoping (tools=None) & XML <untrusted_cv_data>\n"
+                "3. Pydantic Validation, Parameterized SQL & DB Egress Sanitizer\n"
+                "4. Zero-Trust SSRF Egress Guard (ipaddress & Domain Allowlist)\n"
+                "5. SQLite C-Driver Authorizer (SQLITE_DENY)\n"
+                "6. Dynamic DB-Backed Output DLP & Markdown/HTML Sanitizer\n"
+                "7. Tamper-Evident SHA-256 SIEM Audit Log Chain"
             )
         else:
             st.caption(
                 "Vulnerable Mode Active:\n"
-                "Exposes run_raw_sql with bypassable legacy filters, TOCTOU bugs, and unvalidated Markdown rendering."
+                "Exposes run_raw_sql and fetch_portfolio_url with bypassable legacy filters, TOCTOU bugs, Second-Order DB triggers, and unvalidated Markdown rendering."
             )
 
     st.divider()
@@ -158,16 +158,18 @@ with st.sidebar:
     st.divider()
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("Clear Chat", width="stretch"):
+        if st.button("Clear Chat", use_container_width=True):
             st.session_state.messages = []
+            reset_consumption_limiter()
             st.rerun()
     with col2:
-        if st.button("Reset DB", width="stretch"):
+        if st.button("Reset DB", use_container_width=True):
             init_database()
             st.toast("Database reset to default state.")
 
-    if st.button("Clear SIEM Telemetry Logs", width="stretch"):
+    if st.button("Clear SIEM Telemetry Logs", use_container_width=True):
         clear_telemetry_events()
+        reset_consumption_limiter()
         st.toast("Telemetry logs cleared.")
         st.rerun()
 
@@ -219,7 +221,6 @@ if active_view == "HR Copilot Chat (Red / Blue Playground)":
                     else:
                         st.write("*No database tools invoked during this turn.*")
 
-    # Calling st.chat_input at the root level pins it permanently to the bottom of the screen
     if user_prompt := st.chat_input(
         "Ask the HR Copilot about candidates or summarize the uploaded CV..."
     ):
@@ -227,7 +228,6 @@ if active_view == "HR Copilot Chat (Red / Blue Playground)":
         with st.chat_message("user"):
             st.markdown(user_prompt)
 
-        # Immediately scroll down to show the newly submitted user prompt
         auto_scroll_to_bottom()
 
         with st.chat_message("assistant"):
@@ -264,7 +264,6 @@ if active_view == "HR Copilot Chat (Red / Blue Playground)":
                 "meta": result,
             }
         )
-        # Scroll to the very bottom once the assistant response finishes rendering
         auto_scroll_to_bottom()
 
 # =====================================================================
@@ -364,7 +363,7 @@ else:
             ]
             if col in filtered_df.columns
         ]
-        st.dataframe(filtered_df[display_cols], width="stretch", hide_index=True)
+        st.dataframe(filtered_df[display_cols], use_container_width=True, hide_index=True)
 
     st.divider()
     st.subheader("Empirical Benchmark Evaluation (data/benchmark_results.json)")
@@ -397,7 +396,7 @@ else:
             b2.metric(
                 "Hardened ASR (Attack Success)",
                 f"{hard_s.get('attack_success_rate_pct', 0)}%",
-                f"{hard_s.get('mitigated_attacks', 0)}/{hard_s.get('total_attacks', 0)} mitigated",
+                f"{hard_s.get('deterministic_mitigations', hard_s.get('mitigated_attacks', 0))}/{hard_s.get('total_attacks', 0)} deterministic",
                 delta_color="normal",
             )
             b3.metric(
@@ -414,21 +413,25 @@ else:
             if results_list:
                 bench_df = pd.DataFrame(results_list)
                 st.markdown("##### Per-Test-Case Benchmark Matrix")
+                bench_cols = [
+                    col
+                    for col in [
+                        "id",
+                        "category",
+                        "security_mode",
+                        "scenario",
+                        "owasp_2025",
+                        "outcome",
+                        "enforcement_type",
+                        "block_reason",
+                        "tools_called",
+                        "latency_ms",
+                    ]
+                    if col in bench_df.columns
+                ]
                 st.dataframe(
-                    bench_df[
-                        [
-                            "id",
-                            "category",
-                            "security_mode",
-                            "scenario",
-                            "owasp_2025",
-                            "outcome",
-                            "block_reason",
-                            "tools_called",
-                            "latency_ms",
-                        ]
-                    ],
-                    width="stretch",
+                    bench_df[bench_cols],
+                    use_container_width=True,
                     hide_index=True,
                 )
         except Exception as err:

@@ -9,7 +9,9 @@ from google import genai
 from google.genai import types
 import ollama
 
+import src.guardrails as guardrails
 from src.guardrails import (
+    check_unbounded_consumption,
     inspect_and_sanitize_output,
     inspect_user_input,
     sandbox_cv_document,
@@ -176,19 +178,19 @@ def _extract_ollama_tool_calls(
     return extracted
 
 
-def _route_hardened_tool_boundaries(full_prompt: str, allowed_names: set[str]) -> list[tuple[str, dict[str, Any]]]:
+def _route_hardened_tool_boundaries(
+    full_prompt: str, allowed_names: set[str]
+) -> list[tuple[str, dict[str, Any]]]:
     """Ensures adversarial tool/SQL/URL requests in Hardened mode are tested against the actual
     tool-registry, Pydantic, and SSRF egress boundaries even if a small local model skips native JSON output.
     """
     lower_p = full_prompt.lower()
 
-    # 1. If a URL is present, route through the hardened SSRF egress tool boundary
     if "fetch_portfolio_url_safe" in allowed_names:
         urls = URL_IN_PROMPT_RE.findall(full_prompt)
         if urls:
             return [("fetch_portfolio_url_safe", {"url": urls[0].rstrip(".,;)")})]
 
-    # 2. If the prompt attempts to invoke the detached raw SQL tool or pass raw SQL / restricted table queries
     if "search_candidates_safe" in allowed_names:
         if "run_raw_sql" in lower_p or "u0vmrunu" in lower_p:
             record_blocked_tool_attempt(
@@ -257,7 +259,6 @@ def _run_ollama_agent(
     msg = response.get("message", {})
     extracted_calls = _extract_ollama_tool_calls(msg, allowed_tool_names=allowed_names)
 
-    # Check if an unauthorized tool call was already blocked by the Tool Registry boundary
     for entry in get_tool_trace():
         if entry.get("status") == "BLOCKED_UNAUTHORIZED_TOOL":
             return (
@@ -369,7 +370,7 @@ def ask_hr_agent(
     is_hardened = security_mode.upper() == "HARDENED"
     cv_attached = bool(cv_text and cv_text.strip())
 
-    # --- HARDENED MODE: Layer 1 Normalization & Layer 2 Document Sandboxing ---
+    # --- HARDENED MODE: Layer 1a Normalization, Layer 1b Consumption Guard & Layer 2 Document Sandbox ---
     if is_hardened:
         is_input_blocked, cleaned_prompt, input_block_reason = inspect_user_input(user_prompt)
         if is_input_blocked:
@@ -395,6 +396,48 @@ def ask_hr_agent(
                 "answer": answer_text,
                 "status": "BLOCKED",
                 "block_reason": input_block_reason,
+                "security_mode": security_mode,
+                "model": model_label,
+                "latency_ms": latency_ms,
+                "tool_trace": [],
+                "telemetry_event": event,
+            }
+
+        # Layer 1b: OWASP LLM10:2025 Unbounded Consumption (Rate Limit & Token Budget Guardrail)
+        is_dos_blocked, dos_block_reason, dos_metrics = check_unbounded_consumption(
+            cleaned_prompt,
+            cv_text if cv_attached else "",
+            max_requests=guardrails.MAX_REQUESTS_PER_WINDOW,
+            max_single_tokens=guardrails.MAX_SINGLE_TURN_TOKENS,
+            max_window_tokens=guardrails.MAX_TOKENS_PER_WINDOW,
+            window_seconds=guardrails.RATE_LIMIT_WINDOW_SECONDS,
+        )
+        if is_dos_blocked:
+            latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
+            answer_text = (
+                f"**Security Alert (OWASP LLM10:2025 Unbounded Consumption Guardrail):** "
+                f"Request rejected ({dos_block_reason}). "
+                f"Estimated turn tokens: {dos_metrics['turn_estimated_tokens']}, "
+                f"Window requests: {dos_metrics['window_requests']}."
+            )
+            model_label = f"{active_provider} (consumption-guardrail)"
+            event = None
+            if record_telemetry:
+                event = log_security_event(
+                    user_prompt=user_prompt,
+                    cv_attached=cv_attached,
+                    security_mode=security_mode,
+                    model=model_label,
+                    status="BLOCKED",
+                    block_reason=dos_block_reason,
+                    latency_ms=latency_ms,
+                    tool_trace=[],
+                    answer_text=answer_text,
+                )
+            return {
+                "answer": answer_text,
+                "status": "BLOCKED",
+                "block_reason": dos_block_reason,
                 "security_mode": security_mode,
                 "model": model_label,
                 "latency_ms": latency_ms,
@@ -468,7 +511,6 @@ def ask_hr_agent(
             block_reason = entry["status"]
             break
 
-    # Record deterministic architectural scoping when untrusted CV payload was stripped & zero-tool scope applied
     if is_hardened and cv_attached and status == "ALLOWED":
         if "[hr-audit-benchmark]" in cv_text.lower() or "board_salaries" in cv_text.lower():
             block_reason = "ENFORCED_ZERO_TOOL_SCOPE_AND_XML_SANDBOX"

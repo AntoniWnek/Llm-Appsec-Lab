@@ -1,12 +1,19 @@
+from collections import deque
 import ipaddress
 import re
 import sqlite3
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 
 MAX_PROMPT_CHARS = 4000
 CANARY_TOKEN = "CONF-HR-9921-X"
 CLOUD_IAM_CANARY = "CANARY-CLOUD-IAM-KEY-8842-SECRET"
+
+RATE_LIMIT_WINDOW_SECONDS = 60.0
+MAX_REQUESTS_PER_WINDOW = 15
+MAX_SINGLE_TURN_TOKENS = 1200
+MAX_TOKENS_PER_WINDOW = 6000
 
 DB_PATH = Path(__file__).resolve().parent.parent / "data" / "hr_lab.db"
 
@@ -54,6 +61,75 @@ UNTRUSTED_DATA_INJECTION_PATTERNS = [
     r"\bauditor\s+verification\s+note\b",
 ]
 
+_CONSUMPTION_WINDOW: deque[tuple[float, int]] = deque()
+
+
+def estimate_token_count(text: str) -> int:
+    """Estimates BPE token count deterministically without external tokenizer dependencies.
+
+    Combines character-density (~4 chars/token) and word-boundary heuristics so both
+    natural prose and dense symbol/Base64 floods are accurately bounded.
+    """
+    if not text:
+        return 0
+    cleaned = text.strip()
+    if not cleaned:
+        return 0
+    char_estimate = (len(cleaned) + 3) // 4
+    word_estimate = int(len(cleaned.split()) * 1.3)
+    return max(1, char_estimate, word_estimate)
+
+
+def reset_consumption_limiter() -> None:
+    """Clears the sliding-window rate and token budget counters."""
+    _CONSUMPTION_WINDOW.clear()
+
+
+def check_unbounded_consumption(
+    user_prompt: str,
+    cv_text: str = "",
+    max_requests: int = MAX_REQUESTS_PER_WINDOW,
+    max_single_tokens: int = MAX_SINGLE_TURN_TOKENS,
+    max_window_tokens: int = MAX_TOKENS_PER_WINDOW,
+    window_seconds: float = RATE_LIMIT_WINDOW_SECONDS,
+) -> tuple[bool, str | None, dict[str, int]]:
+    """Defense Layer 1b (OWASP LLM10:2025 Unbounded Consumption Guardrail).
+
+    Enforces:
+    1. Per-turn input token ceiling (max_single_tokens).
+    2. Sliding-window request frequency limit (max_requests per window_seconds).
+    3. Sliding-window cumulative token budget (max_window_tokens per window_seconds).
+
+    Returns:
+        (is_blocked, block_reason, telemetry_metrics)
+    """
+    now = time.monotonic()
+
+    while _CONSUMPTION_WINDOW and (now - _CONSUMPTION_WINDOW[0][0]) > window_seconds:
+        _CONSUMPTION_WINDOW.popleft()
+
+    turn_tokens = estimate_token_count(user_prompt) + estimate_token_count(cv_text)
+    current_requests = len(_CONSUMPTION_WINDOW)
+    current_window_tokens = sum(tokens for _, tokens in _CONSUMPTION_WINDOW)
+
+    metrics = {
+        "turn_estimated_tokens": turn_tokens,
+        "window_requests": current_requests + 1,
+        "window_cumulative_tokens": current_window_tokens + turn_tokens,
+    }
+
+    if turn_tokens > max_single_tokens:
+        return True, "BLOCKED_TOKEN_BUDGET_EXCEEDED", metrics
+
+    if current_requests >= max_requests:
+        return True, "BLOCKED_RATE_LIMIT_EXCEEDED", metrics
+
+    if (current_window_tokens + turn_tokens) > max_window_tokens:
+        return True, "BLOCKED_TOKEN_BUDGET_EXCEEDED", metrics
+
+    _CONSUMPTION_WINDOW.append((now, turn_tokens))
+    return False, None, metrics
+
 
 def _load_protected_entities_from_db() -> set[str]:
     """Dynamically loads protected executive names, compensation figures, and markers
@@ -96,11 +172,7 @@ def normalize_text(text: str) -> str:
 
 
 def inspect_user_input(user_prompt: str) -> tuple[bool, str, str | None]:
-    """Defense Layer 1 (Input Normalization & Length Bounding).
-
-    Performs Unicode control-character stripping and length bounding without relying on
-    brittle SQL/table keyword blacklists at the chat perimeter.
-    """
+    """Defense Layer 1a (Input Normalization & Length Bounding)."""
     cleaned = normalize_text(user_prompt)
 
     if len(cleaned) > MAX_PROMPT_CHARS:
@@ -166,11 +238,7 @@ def validate_safe_egress_url(url: str) -> tuple[bool, str]:
 
 
 def sandbox_cv_document(cv_text: str) -> str:
-    """Defense Layer 2 (Untrusted Document XML Structuring & Heuristic Instruction Stripping).
-
-    Note: Structural XML delimiters (<untrusted_cv_data>) are paired with Task-Based Zero-Tool
-    Scoping (tools=None) in src/agent.py so the model has zero agency while summarizing resumes.
-    """
+    """Defense Layer 2 (Untrusted Document XML Structuring & Heuristic Instruction Stripping)."""
     if not cv_text:
         return ""
 
