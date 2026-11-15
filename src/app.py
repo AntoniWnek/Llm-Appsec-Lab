@@ -238,6 +238,7 @@ if active_view == "HR Copilot Chat (Red / Blue Playground)":
                     security_mode=security_mode,
                     provider=selected_provider,
                     record_telemetry=True,
+                    evaluation_mode=True,
                 )
 
             st.markdown(result["answer"])

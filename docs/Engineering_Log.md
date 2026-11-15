@@ -84,20 +84,22 @@ Zero-Trust architecture requires treating internal database egress and outbound 
 
 ---
 
-## Stage 5 — Tamper-Evident SIEM Hash Chain, LLM10 DoS Guardrails & DevSecOps CI
+## Stage 5 — Local Tamper-Evident SIEM Chain, Heuristic LLM10 Guardrails & Evaluation Methodology
 
 ### Problem
-1. **Log Tampering Risk:** Plaintext JSONL log files can be edited post-exploitation by an attacker or malicious insider to erase evidence of `canary_leaked: true` or delete specific event rows.
-2. **Unbounded Consumption (`OWASP LLM10:2025`):** Local CPU models and cloud APIs are vulnerable to request flooding and token-stuffing Denial-of-Service attacks.
-3. **Pipeline Supply-Chain & Code Hygiene:** Security regressions and vulnerable third-party packages must be caught automatically on every commit.
+1. **Log Integrity Risk:** Plaintext JSONL log files can be edited post-incident to modify fields (`"canary_leaked": false`) or delete individual event rows without breaking JSON syntax.
+2. **Unbounded Consumption (`OWASP LLM10:2025`):** Local CPU models and cloud APIs are vulnerable to request flooding and context-stuffing Denial-of-Service attacks.
+3. **Separating Backend Verification from Small-Model Variance:** When `run_raw_sql` is detached in `Hardened` mode, a 3B parameter local model may refuse in plain text rather than emitting a structured tool call, leaving downstream Pydantic and SSRF guards unexercised during automated evaluation.
 
 ### Technical Decision
-1. **Cryptographic SHA-256 Hash Chaining (`src/telemetry.py`):** Added `prev_hash` and `event_hash` fields to every telemetry record, linking each entry to the preceding record's SHA-256 digest starting from `GENESIS_HASH` (`0` * 64). Added `verify_telemetry_integrity()` to recompute canonical JSON digests and verify chain continuity in the SOC Dashboard.
-2. **Sliding-Window Rate & Token Budget Limiter (`check_unbounded_consumption`):** Enforced per-turn token caps (`1200` tokens), rolling 60-second request frequency limits (`15` requests/window -> `BLOCKED_RATE_LIMIT_EXCEEDED`), and cumulative rolling window token budgets (`6000` tokens/window -> `BLOCKED_TOKEN_BUDGET_EXCEEDED`).
-3. **DevSecOps SAST & SCA in GitHub Actions (`.github/workflows/ci.yml`):** Added **Bandit** static code analysis (`bandit -r src/ -ll --skip B310`) and **pip-audit** dependency scanning alongside **48 automated `pytest` cases (across 20 test functions)**.
+1. **Local Tamper-Evident SHA-256 Hash Chaining (`src/telemetry.py`):** Added `prev_hash` and `event_hash` fields to every telemetry record, linking each entry to the preceding record's SHA-256 digest starting from `GENESIS_HASH` (`0` * 64). Added `verify_telemetry_integrity()` to verify internal chain consistency and detect record edits or deletions in the SOC Dashboard.
+2. **In-Memory Sliding-Window Rate & Heuristic Token Limiter (`check_unbounded_consumption`):** Implemented `estimate_token_count()` using deterministic character and word heuristics (an approximate input-size metric rather than a BPE tokenizer) and an in-memory per-process deque (`_CONSUMPTION_WINDOW`) enforcing per-turn caps (`1200` estimated tokens), rolling 60-second request limits (`15` requests/window -> `BLOCKED_RATE_LIMIT_EXCEEDED`), and cumulative window budgets (`6000` estimated tokens/window -> `BLOCKED_TOKEN_BUDGET_EXCEEDED`).
+3. **Evaluation-Only Boundary Routing (`_route_hardened_tool_boundaries` in `src/agent.py`):** Isolated `_route_hardened_tool_boundaries()` behind `evaluation_mode: bool = False`. During normal execution (`evaluation_mode=False`), the model decides tool usage on its own without router intervention. During security evaluation (`evaluation_mode=True`), the evaluation harness forwards adversarial payloads to the target backend boundary whenever the local model omits native JSON tool calls.
+4. **DevSecOps SAST & SCA in GitHub Actions (`.github/workflows/ci.yml`):** Added **Bandit** static code analysis (`bandit -r src/ -ll --skip B310`) and **pip-audit** dependency scanning alongside **49 executed `pytest` test cases across 21 test functions** (unit checks, parametrized negative boundary suites, and mocked-LLM integration tests).
 
 ### Engineering Rationale ("Why")
-Cryptographic hash chaining makes local JSONL logs tamper-evident: modifying any historical field invalidates that row's SHA-256 digest, and deleting a row breaks the `prev_hash` pointer of the subsequent row. Combining deterministic unit/negative/integration tests with SAST and SCA in CI ensures continuous verification.
+- **Methodological Transparency:** Deterministic Boundary Routing is an evaluation-only fallback used to exercise backend security controls when a local model does not emit native structured tool calls. Its results are reported separately from natural model tool-calling behavior and are not treated as evidence of model-level attack resistance.
+- **Integrity vs. Authenticity:** Documenting the SHA-256 chain as verifying internal chain consistency (*integrity*) while noting that external *authenticity* against full-file hash recomputation requires an external KMS key (`HMAC-SHA256`), signed checkpoints, or remote append-only SIEM storage aligns security claims strictly with the code.
 
 ### Verification
-- Verified via `pytest -v` (`48 passed` in `< 1.5s`, including simulated in-place JSONL tampering, line deletion, and burst DoS floods) and `bandit -r src/ -ll --skip B310`.
+- Verified via `pytest -v` (`49 passed` in `< 1.5s`, covering SQLite authorizer denials, Pydantic validation, SSRF IPv4/IPv6 guards, SHA-256 chain tampering, and LLM10 rate/token limits) and `bandit -r src/ -ll --skip B310` (`0 issues`).

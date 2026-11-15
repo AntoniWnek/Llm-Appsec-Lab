@@ -3,7 +3,7 @@
 ![Python](https://img.shields.io/badge/Python-3.11%2B-blue)
 ![Security Standard](https://img.shields.io/badge/OWASP_LLM_Top_10-2025-critical)
 ![Architecture](https://img.shields.io/badge/LLM_Engine-Ollama_%7C_Gemini_API-success)
-![Tests](https://img.shields.io/badge/Pytest-48_Passing_(20_Suites)-brightgreen)
+![Tests](https://img.shields.io/badge/Pytest-49_Passing_(21_Test_Functions)-brightgreen)
 ![DevSecOps](https://img.shields.io/badge/CI-Pytest_%7C_Bandit_SAST_%7C_pip--audit-informational)
 ![License](https://img.shields.io/badge/License-MIT-lightgrey)
 
@@ -25,7 +25,7 @@ Simulates realistic enterprise anti-patterns where developers rely on naive peri
   - **Naive Substring Validation:** Checks whether `"from candidates"` appears in the query string, allowing `UNION SELECT` injections against `board_salaries` (`ATK-05`).
   - **Off-Canvas PDF Parser Differential (`ATK-06`):** Concatenates raw text streams extracted by `pypdf`, including hidden instructions placed at coordinates `(-5000, -5000)` outside the PDF `MediaBox [0 0 612 792]`.
   - **Implicit Trust in Internal Database Rows (`ATK-07`):** Executes dormant Second-Order Stored Prompt Injections retrieved from candidate skill columns (`Victor Reznov`).
-  - **Simulated Cloud IMDSv1 SSRF (`ATK-08`):** Permits outbound requests against a simulated link-local Cloud Instance Metadata endpoint (`http://169.254.169.254/latest/meta-data/iam/security-credentials/hr-copilot-prod-role`), leaking synthetic AWS STS-style keys (`ASIA-HR-PROD-9921`).
+  - **Simulated Cloud IMDSv1 SSRF (`ATK-08`):** Accepts metadata-like URLs (e.g., `169.254.169.254`) and redirects demonstration requests locally to the mock listener at `127.0.0.1:8888` (or returns an in-memory synthetic AWS STS-style payload containing `ASIA-HR-PROD-9921` if the listener is unavailable).
 
 ### Hardened Mode (Tool & Data Boundary Enforcement)
 In `Hardened` mode, superficial chat keyword filters are removed so that adversarial inputs are tested against deterministic backend boundaries:
@@ -58,17 +58,16 @@ In `Hardened` mode, superficial chat keyword filters are removed so that adversa
 ## 3. Scope of Security Claims & Known Limitations
 
 This project is an isolated security research environment using synthetic data and simulated endpoints:
-- **Deterministic vs. Probabilistic Separation:** Because LLM outputs can vary across runs and model sizes, `src/run_benchmark.py` explicitly separates mitigations enforced deterministically by application code (`DETERMINISTIC_CODE_CONTROL`) from unblocked turns where the model refused on its own (`PROBABILISTIC_MODEL_BEHAVIOR`).
-- **XML Delimiters vs. Tool Scoping:** `<untrusted_cv_data>` tags are structural markers, not an independent security boundary. Confidential data protection during resume summarization relies on detaching tools (`active_tools = []`) and C-driver database controls.
-- **Simulated Cloud Metadata:** `ATK-08` simulates an AWS IMDSv1 endpoint locally (`ASIA-...` format); no real cloud credentials are targeted, and production SSRF defenses should combine application-layer URL validation with network-layer VPC egress rules.
-- **Authorized Semantic Manipulation:** Backend access controls (`sqlite3.set_authorizer`, `Pydantic`) prevent unauthorized table reads and network calls, but do not prevent purely semantic persuasion within authorized resume fields.
+- **Deterministic vs. Probabilistic Separation & Evaluation Routing:** Because LLM outputs vary across runs and model sizes, `src/run_benchmark.py` separates mitigations enforced deterministically by backend code (`DETERMINISTIC_CODE_CONTROL`) from unblocked turns where the model refused on its own (`PROBABILISTIC_MODEL_BEHAVIOR`). Deterministic Boundary Routing (`_route_hardened_tool_boundaries()`, enabled via `evaluation_mode=True`) is an evaluation-only fallback used to exercise backend security controls when a local model does not emit native structured tool calls; its results verify backend enforcement and are not treated as evidence of model-level attack resistance.
+- **Turn-Scoped Tool Omission & XML Delimiters:** `<untrusted_cv_data>` tags are structural markers, not an independent security boundary. When `cv_attached=True` in `Hardened` mode, the orchestrator omits tool definitions from that provider request (`tools=None`) while the backend independently enforces tool authorization.
+- **Simulated Cloud Metadata & DNS Rebinding:** `ATK-08` simulates an AWS IMDSv1 endpoint locally (redirecting demonstration metadata requests to `127.0.0.1:8888` or a synthetic `ASIA-...` fallback); no real cloud infrastructure is contacted. Production SSRF defenses must pair application-layer URL/IP validation with single-resolution IP pinning, disabled HTTP redirects, and network-layer VPC egress rules to prevent DNS rebinding.
+- **SIEM Integrity vs. External Authenticity & In-Memory Limits:** The `SHA-256` hash chain in `src/telemetry.py` verifies internal chain consistency (*integrity*) against single-record modification or deletion, but full *authenticity* against whole-file hash recomputation by a privileged local attacker requires an external trust anchor (e.g., `HMAC-SHA256` or remote append-only SIEM). Similarly, the `OWASP LLM10` sliding-window limiter uses heuristic token estimation in process memory rather than a distributed state store or BPE tokenizer.
 
 For deep-dive documentation, see:
 - [`docs/Threat_Model.md`](docs/Threat_Model.md) — 3-Domain Threat Model, trust boundaries, and residual risk analysis.
 - [`docs/Engineering_Log.md`](docs/Engineering_Log.md) — 5-Stage architectural decision log (*Problem -> Decision -> Rationale -> Verification*).
 - [`CHANGELOG.md`](CHANGELOG.md) — Milestone history following *Keep a Changelog*.
 - [`reports/Walkthrough.md`](reports/Walkthrough.md) — Step-by-step exploitation and defense verification walkthrough.
-
 ---
 
 ## 4. Repository Structure
@@ -77,7 +76,7 @@ For deep-dive documentation, see:
 Llm-Appsec-Lab/
 ├── .github/
 │   └── workflows/
-│       └── ci.yml                 # Automated Pytest (48 cases), Bandit SAST & pip-audit CI pipeline
+│       └── ci.yml                 # Automated Pytest (49 cases), Bandit SAST & pip-audit CI pipeline
 ├── data/
 │   ├── benchmark_results.json     # Empirical evaluation output (ATK-01..08 & BEN-01..03)
 │   ├── poisoned_cv.pdf            # Stealth PDF with off-canvas (-5000, -5000) exploit payload
@@ -102,7 +101,7 @@ Llm-Appsec-Lab/
 │   ├── telemetry.py               # Tamper-evident SHA-256 JSONL SIEM logger & integrity verifier
 │   └── tools.py                   # Vulnerable raw tools vs. Pydantic, Authorizer & SSRF-safe tools
 ├── tests/
-│   └── test_security_controls.py  # 48 automated test cases across 20 test suites
+│   └── test_security_controls.py  # 49 automated test cases across 21 test functions
 ├── .dockerignore                  # Files excluded from the Docker build context
 ├── .env.example                   # Template for Ollama and Gemini API configuration
 ├── .gitignore                     # Git exclusions (venv, .env, local SQLite DB, runtime JSONL logs)
@@ -111,7 +110,7 @@ Llm-Appsec-Lab/
 ├── LICENSE                        # MIT License
 ├── README.md                      # Project overview and reproduction guide
 ├── pytest.ini                     # Pytest rootpath configuration
-└── requirements.txt               # Pinned Python dependencies
+└── requirements.txt               # Python dependency specifications
 ```
 
 ---
@@ -130,7 +129,7 @@ cp .env.example .env
 python src/init_db.py
 python src/generate_cv_pdfs.py
 
-# 2. Run all 48 automated security test cases (unit, negative boundary, SHA-256 SIEM, LLM10 DoS & integration)
+# 2. Run all 49 automated security test cases (unit, negative boundary, SHA-256 SIEM, LLM10 DoS & integration)
 pytest -v
 
 # 3. Launch the interactive Streamlit Lab & SOC Dashboard

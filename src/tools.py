@@ -284,7 +284,7 @@ def fetch_portfolio_url_safe(url: str) -> str:
     safe_summary = json.dumps(
         {
             "verified_url": reason_or_url,
-            "portfolio_status": "Verified public candidate repository on allowlisted HTTPS domain.",
+            "portfolio_status": "URL passed outbound egress policy validation. Remote content was not fetched.",
         }
     )
     trace_entry["row_count"] = 1

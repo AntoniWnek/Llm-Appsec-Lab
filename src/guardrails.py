@@ -67,10 +67,10 @@ _CONSUMPTION_WINDOW: deque[tuple[float, int]] = deque()
 
 
 def estimate_token_count(text: str) -> int:
-    """Estimates BPE token count deterministically without external tokenizer dependencies.
+    """Estimate token usage using deterministic character and word heuristics.
 
-    Combines character-density (~4 chars/token) and word-boundary heuristics so both
-    natural prose and dense symbol/Base64 floods are accurately bounded.
+    This is an approximate input-size metric, not a model-specific BPE
+    tokenizer. It is intended for coarse resource-budget enforcement.
     """
     if not text:
         return 0
@@ -83,7 +83,7 @@ def estimate_token_count(text: str) -> int:
 
 
 def reset_consumption_limiter() -> None:
-    """Clears the sliding-window rate and token budget counters."""
+    """Clears the in-memory sliding-window rate and token budget counters."""
     _CONSUMPTION_WINDOW.clear()
 
 
@@ -97,13 +97,14 @@ def check_unbounded_consumption(
 ) -> tuple[bool, str | None, dict[str, int]]:
     """Defense Layer 1b (OWASP LLM10:2025 Unbounded Consumption Guardrail).
 
+    Maintains sliding-window consumption history in process memory (_CONSUMPTION_WINDOW).
+    Because state is stored in-memory per Python process, limits are not shared across
+    multiple workers or distributed container instances.
+
     Enforces:
-    1. Per-turn input token ceiling (max_single_tokens).
+    1. Per-turn heuristic input token ceiling (max_single_tokens).
     2. Sliding-window request frequency limit (max_requests per window_seconds).
     3. Sliding-window cumulative token budget (max_window_tokens per window_seconds).
-
-    Returns:
-        (is_blocked, block_reason, telemetry_metrics)
     """
     now = time.monotonic()
 

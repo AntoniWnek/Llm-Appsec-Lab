@@ -38,13 +38,13 @@ jobs:
 
       - name: Run Software Composition Analysis (pip-audit SCA)
         run: |
-          pip-audit -r requirements.txt || true
+          pip-audit -r requirements.txt
 
       - name: Initialize SQLite database and stealth PDF fixture
         run: |
           python src/init_db.py
           python src/generate_cv_pdfs.py
 
-      - name: Execute Pytest Security & Integration Suite (48 Cases)
+      - name: Execute Pytest Security & Integration Suite (49 Cases)
         run: |
           pytest -v

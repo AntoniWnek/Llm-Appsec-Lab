@@ -211,6 +211,7 @@ def run_benchmark(
                 security_mode=mode,
                 provider=active_provider,
                 record_telemetry=True,
+                evaluation_mode=True,
             )
 
             if "pre-filter" not in res["model"] and "guardrail" not in res["model"]:

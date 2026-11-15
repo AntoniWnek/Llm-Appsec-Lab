@@ -129,7 +129,7 @@ def get_gemini_client() -> genai.Client:
 def _extract_ollama_tool_calls(
     msg: dict[str, Any], allowed_tool_names: set[str]
 ) -> list[tuple[str, dict[str, Any]]]:
-    """Extracts tool calls and enforces Tool Registry Least-Privilege boundaries."""
+    """Extracts model-emitted tool calls and enforces Tool Registry Least-Privilege boundaries."""
     extracted: list[tuple[str, dict[str, Any]]] = []
 
     native_calls = msg.get("tool_calls")
@@ -181,8 +181,14 @@ def _extract_ollama_tool_calls(
 def _route_hardened_tool_boundaries(
     full_prompt: str, allowed_names: set[str]
 ) -> list[tuple[str, dict[str, Any]]]:
-    """Ensures adversarial tool/SQL/URL requests in Hardened mode are tested against the actual
-    tool-registry, Pydantic, and SSRF egress boundaries even if a small local model skips native JSON output.
+    """Evaluation-Only Boundary Routing Fallback.
+
+    Active ONLY when evaluation_mode=True. Small local models (e.g., qwen2.5:3b) frequently
+    respond in plain text instead of emitting structured JSON tool calls when confronted with
+    adversarial prompts. During security evaluation, this harness forwards adversarial URL,
+    SQL, and detached-tool payloads to the corresponding backend security boundary so that
+    backend controls (Tool Registry, Pydantic, SSRF Egress Guard) are deterministically
+    verified. It is disabled during normal execution (evaluation_mode=False).
     """
     lower_p = full_prompt.lower()
 
@@ -233,6 +239,7 @@ def _run_ollama_agent(
     system_prompt: str,
     active_tools: list[Callable[..., str]],
     is_hardened: bool = False,
+    evaluation_mode: bool = False,
 ) -> tuple[str, str]:
     model_name = os.getenv("OLLAMA_MODEL", "qwen2.5:3b")
     ollama_opts = {
@@ -271,7 +278,7 @@ def _run_ollama_agent(
             urls = URL_IN_PROMPT_RE.findall(full_prompt)
             if urls and ("fetch" in full_prompt.lower() or "meta-data" in full_prompt.lower()):
                 extracted_calls = [("fetch_portfolio_url", {"url": urls[0].rstrip(".,;)")})]
-        elif is_hardened:
+        elif is_hardened and evaluation_mode:
             extracted_calls = _route_hardened_tool_boundaries(full_prompt, allowed_names)
             for entry in get_tool_trace():
                 if entry.get("status") == "BLOCKED_UNAUTHORIZED_TOOL":
@@ -362,7 +369,20 @@ def ask_hr_agent(
     security_mode: str = "VULNERABLE",
     provider: str | None = None,
     record_telemetry: bool = True,
+    evaluation_mode: bool = False,
 ) -> dict[str, Any]:
+    """Executes an HR Copilot turn.
+
+    Args:
+        user_prompt: The user or recruiter query.
+        cv_text: Extracted text from an uploaded resume, if any.
+        security_mode: 'VULNERABLE' or 'HARDENED'.
+        provider: 'ollama' or 'gemini'.
+        record_telemetry: Whether to append an event to data/telemetry.jsonl.
+        evaluation_mode: Defaults to False (Normal Execution). When True (used by the
+            security evaluation harness), enables deterministic boundary routing fallback
+            when small local models omit native JSON tool calls.
+    """
     clear_tool_trace()
     start_time = time.perf_counter()
 
@@ -484,7 +504,7 @@ def ask_hr_agent(
     system_prompt = HARDENED_SYSTEM_PROMPT if is_hardened else VULNERABLE_SYSTEM_PROMPT
 
     # Task-Based Tool Scoping in Hardened Mode:
-    # When summarizing an untrusted CV (cv_attached=True), detach all database and network tools (active_tools=[])
+    # When summarizing an untrusted CV (cv_attached=True), omit tool declarations from the provider request (tools=None)
     if is_hardened:
         active_tools = [] if cv_attached else [search_candidates_safe, fetch_portfolio_url_safe]
     else:
@@ -495,7 +515,11 @@ def ask_hr_agent(
             answer_text, model_label = _run_gemini_agent(full_prompt, system_prompt, active_tools)
         else:
             answer_text, model_label = _run_ollama_agent(
-                full_prompt, system_prompt, active_tools, is_hardened=is_hardened
+                full_prompt,
+                system_prompt,
+                active_tools,
+                is_hardened=is_hardened,
+                evaluation_mode=evaluation_mode,
             )
         status = "ALLOWED"
     except Exception as exc:
